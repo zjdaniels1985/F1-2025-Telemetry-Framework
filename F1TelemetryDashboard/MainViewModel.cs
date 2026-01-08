@@ -6,6 +6,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using F1TelemetryDashboard.Models;
 using F1TelemetryDashboard.Parsers;
 using F1TelemetryDashboard.Services;
@@ -16,9 +17,13 @@ namespace F1TelemetryDashboard
     public class MainViewModel : INotifyPropertyChanged
     {
         private const int MaxCars = 22;
+        private const int WaitingThresholdSeconds = 5;
         private UdpTelemetryListener? _listener;
         private readonly F12025TelemetryParser _parser = new();
         private readonly Dictionary<int, LapTimeEntry> _allFastestLaps = new();
+        private readonly DispatcherTimer _statusTimer;
+        private DateTime _lastPacketTime = DateTime.MinValue;
+        private bool _isListening = false;
 
         private string _bindAddress = "127.0.0.1";
         private string _port = "2077";
@@ -52,6 +57,15 @@ namespace F1TelemetryDashboard
         {
             ReconnectCommand = new RelayCommand(OnReconnect);
             InitializeCollections();
+            
+            // Timer to update connection status
+            _statusTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(1)
+            };
+            _statusTimer.Tick += OnStatusTimerTick;
+            _statusTimer.Start();
+            
             OnReconnect(null);
         }
 
@@ -69,6 +83,8 @@ namespace F1TelemetryDashboard
             _listener?.Stop();
             _listener?.Dispose();
             _listener = null;
+            _isListening = false;
+            _lastPacketTime = DateTime.MinValue;
 
             if (!int.TryParse(Port, out int port) || port <= 0 || port > 65535)
             {
@@ -81,7 +97,8 @@ namespace F1TelemetryDashboard
                 _listener = new UdpTelemetryListener(BindAddress, port);
                 _listener.PacketReceived += OnPacketReceived;
                 _listener.Start();
-                ConnectionStatus = $"Listening on {BindAddress}:{port}";
+                _isListening = true;
+                ConnectionStatus = $"Listening on {BindAddress}:{port} - Waiting for session to start...";
             }
             catch (Exception ex)
             {
@@ -89,8 +106,33 @@ namespace F1TelemetryDashboard
             }
         }
 
+        private void OnStatusTimerTick(object? sender, EventArgs e)
+        {
+            if (!_isListening) return;
+
+            var timeSinceLastPacket = DateTime.Now - _lastPacketTime;
+            
+            if (_lastPacketTime == DateTime.MinValue)
+            {
+                // No packets received yet
+                ConnectionStatus = $"Listening on {BindAddress}:{Port} - Waiting for session to start...";
+            }
+            else if (timeSinceLastPacket.TotalSeconds > WaitingThresholdSeconds)
+            {
+                // Data stopped coming
+                ConnectionStatus = $"Listening on {BindAddress}:{Port} - No data (session ended or paused)";
+            }
+            else
+            {
+                // Actively receiving data
+                ConnectionStatus = $"Listening on {BindAddress}:{Port} - Receiving data";
+            }
+        }
+
         private void OnPacketReceived(byte[] buffer, System.Net.IPEndPoint remote)
         {
+            _lastPacketTime = DateTime.Now;
+            
             var parsed = _parser.ParsePacket(buffer);
             if (parsed == null) return;
 
